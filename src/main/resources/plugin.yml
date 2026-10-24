@@ -1,0 +1,15 @@
+name: MenuReturnBridge
+version: 1.1.0
+main: team.nomi.bridge.MenuReturnBridge
+api-version: '1.21'
+folia-supported: true
+softdepend: [MyPet, TrMenu, FarmersDelight, PlayerInv]
+commands:
+  nuomimenu:
+    description: Open your public navigation menu
+  menureturn:
+    description: Verify navigation boundaries and audit active menus
+    permission: menureturn.audit
+permissions:
+  menureturn.audit:
+    default: op
