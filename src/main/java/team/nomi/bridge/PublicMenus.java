@@ -1,33 +1,54 @@
 package team.nomi.bridge;
 
-import java.lang.reflect.*;
-import java.util.*;
-import java.util.function.Consumer;
-import org.bukkit.command.*;
+import java.util.Locale;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandExecutor;
+import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 
+/** 仅允许玩家为自己打开白名单菜单，不执行目标菜单的业务。 */
 final class PublicMenus implements CommandExecutor {
- private final JavaPlugin plugin;
- PublicMenus(JavaPlugin p){plugin=p;}
- @Override public boolean onCommand(CommandSender s,Command c,String label,String[] a){
-  if(!(s instanceof Player p)){s.sendMessage("Only players can open their own menu.");return true;}
-  String id=a.length==0?"Menu":a.length==1?switch(a[0].toLowerCase(Locale.ROOT)){
-   case "menu"->"Menu";case "activity"->"Activity";case "vipcontrol"->"VipControl";case "sponsor"->"Sponsor";case "dailyquestreset"->"DailyQuestReset";default->null;}:null;
-  if(id==null){s.sendMessage("/nuomimenu [Menu|Activity|VipControl|Sponsor|DailyQuestReset]");return true;}
-  p.getScheduler().run(plugin,t->open(p,id),null);return true;
- }
- @SuppressWarnings({"unchecked","rawtypes"}) private void open(Player p,String id){
-  var tr=plugin.getServer().getPluginManager().getPlugin("TrMenu");
-  if(tr==null || !tr.isEnabled()){p.sendMessage("菜单暂不可用。");return;}
-  try{
-   String prefix="me.arasple.mc.trmenu";Class<?> api;
-   try{api=Class.forName(prefix+".api.TrMenuAPI",true,tr.getClass().getClassLoader());}
-   catch(ClassNotFoundException ex){prefix="trplugins.menu";api=Class.forName(prefix+".api.TrMenuAPI",true,tr.getClass().getClassLoader());}
-   Object menu=api.getMethod("getMenuById",String.class).invoke(api.getField("INSTANCE").get(null),id);
-   if(menu==null){p.sendMessage("菜单未配置："+id);return;}
-   Class<? extends Enum> reason=(Class<? extends Enum>)Class.forName(prefix+".api.event.MenuOpenEvent$Reason",true,tr.getClass().getClassLoader());
-   menu.getClass().getMethod("open",Player.class,Integer.class,reason,Consumer.class).invoke(menu,p,null,Enum.valueOf(reason,"BINDING_COMMANDS"),(Consumer<Object>)ignored->{});
-  }catch(ReflectiveOperationException|LinkageError ex){plugin.getLogger().log(java.util.logging.Level.WARNING,"Menu route failed: "+id,ex);p.sendMessage("菜单打开失败，请联系管理员。");}
- }
+    private final JavaPlugin plugin;
+    private final TrMenuGateway menus;
+
+    PublicMenus(JavaPlugin plugin) {
+        this.plugin = plugin;
+        this.menus = new TrMenuGateway(plugin);
+    }
+
+    /** 校验参数数量并返回原生菜单 ID；null 表示拒绝路由。 */
+    static String menuId(String[] arguments) {
+        if (arguments.length == 0) {
+            return "Menu";
+        }
+        if (arguments.length != 1) {
+            return null;
+        }
+        return switch (arguments[0].toLowerCase(Locale.ROOT)) {
+            case "menu" -> "Menu";
+            case "activity" -> "Activity";
+            case "vipcontrol" -> "VipControl";
+            case "sponsor" -> "Sponsor";
+            case "dailyquestreset" -> "DailyQuestReset";
+            default -> null;
+        };
+    }
+
+    /** 将已校验的自身菜单请求交给玩家实体线程执行。 */
+    @Override
+    public boolean onCommand(CommandSender sender, Command command, String label, String[] arguments) {
+        if (!(sender instanceof Player player)) {
+            sender.sendMessage("Only players can open their own menu.");
+            return true;
+        }
+        String menuId = menuId(arguments);
+        if (menuId == null) {
+            sender.sendMessage("/nuomimenu [Menu|Activity|VipControl|Sponsor|DailyQuestReset]");
+            return true;
+        }
+        // Paper/Folia 上的库存打开必须归属该玩家，不能切到全局调度器。
+        player.getScheduler().run(plugin, task -> menus.open(player, menuId), null);
+        return true;
+    }
 }

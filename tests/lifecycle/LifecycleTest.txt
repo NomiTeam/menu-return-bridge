@@ -1,0 +1,283 @@
+package team.nomi.bridge;
+
+import de.Keyle.MyPet.api.gui.MenuDefinition;
+import de.Keyle.MyPet.api.gui.SlotSection;
+import de.Keyle.MyPet.gui.MenuInstanceImpl;
+import de.Keyle.MyPet.gui.context.PetMenuContext;
+import io.papermc.paper.threadedregions.scheduler.EntityScheduler;
+import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
+import java.lang.reflect.*;
+import java.util.*;
+import java.util.function.Consumer;
+import org.bukkit.entity.Player;
+import org.bukkit.event.inventory.*;
+import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.inventory.*;
+
+/**
+ * Executes production click/close/open/quit/shutdown with deterministic entity ticks.
+ * Proxies and menu doubles isolate orchestration; this is not a live plugin test.
+ */
+@SuppressWarnings("removal")
+public final class LifecycleTest {
+    interface Call {
+        Object invoke(String name, Object[] args) throws Throwable;
+    }
+    @SuppressWarnings("unchecked")
+
+    static <T> T proxy(Class<T> type, Call call) {
+        return (T) Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type}, (p, m, a) -> {
+            if (m.getName().equals("hashCode")) {
+                return System.identityHashCode(p);
+            }
+            if (m.getName().equals("equals")) {
+                return p == a[0];
+            }
+            Object result = call.invoke(m.getName(), a);
+            if (result != null || !m.getReturnType().isPrimitive()) {
+                return result;
+            }
+            if (m.getReturnType() == boolean.class) {
+                return false;
+            }
+            if (m.getReturnType() == void.class) {
+                return null;
+            }
+            return 0;
+        });
+    }
+
+    static Object allocate(Class<?> type) throws Exception {
+        // Bypass JavaPlugin server initialization; only explicitly injected state is used.
+        Class<?> unsafe = Class.forName("sun.misc.Unsafe");
+        Field field = unsafe.getDeclaredField("theUnsafe");
+        field.setAccessible(true);
+        return unsafe.getMethod("allocateInstance", Class.class).invoke(field.get(null), type);
+    }
+
+    static void set(Object owner, String name, Object value) throws Exception {
+        Field field = owner.getClass().getDeclaredField(name);
+        field.setAccessible(true);
+        field.set(owner, value);
+    }
+
+    static final class Task {
+        boolean cancelled;
+        Consumer<ScheduledTask> action;
+        ScheduledTask handle = proxy(ScheduledTask.class, (name, args) -> {
+            if (name.equals("cancel")) {
+                cancelled = true;
+                return ScheduledTask.CancelledState.CANCELLED_BY_CALLER;
+            }
+            return null;
+        });
+    }
+
+    static final class Fixture {
+        final UUID id = UUID.randomUUID();
+        final List<Task> queue = new ArrayList<>();
+        final MenuReturnBridge bridge;
+        final PublicMenus commands;
+        final PetNavigation pets;
+        final Player player;
+        final Inventory source;
+        Inventory current;
+        final InventoryView view;
+        Fixture(boolean pet) throws Exception {
+            bridge = (MenuReturnBridge) allocate(MenuReturnBridge.class);
+            set(bridge, "sessions", new HashMap<UUID, InventorySession>());
+            set(bridge, "owners", new HashMap<>(Map.of(Inventory.class.getClassLoader(), "FarmersDelight")));
+            set(bridge, "button", new ReturnButton(null));
+            commands = new PublicMenus(bridge);
+            pets = new PetNavigation(bridge);
+            set(bridge, "petNavigation", pets);
+            EntityScheduler scheduler = proxy(EntityScheduler.class, (name, args) -> {
+                Task task = new Task();
+                @SuppressWarnings("unchecked")
+                Consumer<ScheduledTask> action = (Consumer<ScheduledTask>) args[1];
+                task.action = action;
+                queue.add(task);
+                return task.handle;
+            });
+            player = proxy(Player.class, (name, args) -> switch (name) {
+                case "getUniqueId" -> id;
+                case "getScheduler" -> scheduler;
+                case "getOpenInventory" -> view();
+                case "performCommand" -> {
+                    commands.onCommand(player(), null, "nuomimenu", new String[0]);
+                    yield true;
+                }
+                default -> null;
+            });
+            MenuInstanceImpl menu = new MenuInstanceImpl();
+            menu.context = new PetMenuContext(player, null);
+            // Real MyPet definition/section objects, with only the runtime menu instance doubled.
+            menu.definition = definition();
+            source = inventory(pet ? menu : null, true);
+            current = source;
+            view = proxy(InventoryView.class, (name, args) -> switch (name) {
+                case "getTopInventory", "getInventory" -> current;
+                case "getPlayer" -> player;
+                case "getType" -> InventoryType.CHEST;
+                case "getTitle", "getOriginalTitle" -> "农夫乐事 · 配方";
+                case "title" -> net.kyori.adventure.text.Component.text("农夫乐事 · 配方");
+                case "convertSlot" -> args[0];
+                default -> null;
+            });
+            // Dispatch bridge close handlers only; real MyPet dispatcher state is not modeled.
+            menu.closing = this::close;
+            sessions().put(id, new InventorySession(source, "FarmersDelight", "农夫乐事 · 配方", ""));
+        }
+
+        Player player() {
+            return player;
+        }
+
+        InventoryView view() {
+            return view;
+        }
+        @SuppressWarnings("unchecked")
+        Map<UUID, InventorySession> sessions() throws Exception {
+            Field field = MenuReturnBridge.class.getDeclaredField("sessions");
+            field.setAccessible(true);
+            return (Map<UUID, InventorySession>) field.get(bridge);
+        }
+        Inventory inventory(InventoryHolder holder, boolean supported) {
+            return proxy(Inventory.class, (name, args) -> switch (name) {
+                case "getSize" -> 54;
+                case "getType" -> supported ? InventoryType.CHEST : InventoryType.FURNACE;
+                case "getHolder" -> holder;
+                default -> null;
+            });
+        }
+
+        void click(boolean pet) {
+            InventoryClickEvent event = new InventoryClickEvent(view, InventoryType.SlotType.CONTAINER,
+                0, ClickType.LEFT, InventoryAction.PICKUP_ALL);
+            if (pet) {
+                pets.click(event);
+            } else {
+                bridge.click(event);
+            }
+            if (!event.isCancelled()) {
+                throw new AssertionError("return click not intercepted");
+            }
+        }
+
+        void close() {
+            InventoryCloseEvent event = new InventoryCloseEvent(view);
+            bridge.close(event);
+            pets.close(event);
+        }
+
+        void change(String event) {
+            switch (event) {
+                case "close" -> close();
+                case "supported", "unsupported" -> {
+                    close();
+                    current = inventory(event.equals("supported")
+                        ? proxy(InventoryHolder.class, (name, args) -> null) : null, event.equals("supported"));
+                    InventoryOpenEvent opened = new InventoryOpenEvent(view);
+                    bridge.open(opened);
+                    pets.open(opened);
+                    try {
+                        if (sessions().containsKey(id) != event.equals("supported")) {
+                            throw new AssertionError("window fixture recognition: " + event);
+                        }
+                    } catch (Exception exception) {
+                        throw new AssertionError(exception);
+                    }
+                }
+                case "quit" -> {
+                    PlayerQuitEvent quit = new PlayerQuitEvent(player, net.kyori.adventure.text.Component.empty());
+                    bridge.quit(quit);
+                    pets.quit(quit);
+                }
+                case "disable" -> bridge.onDisable();
+                default -> throw new AssertionError(event);
+            }
+        }
+
+        void tick() {
+            // A tick drains a snapshot: work queued by callbacks waits for the next tick.
+            List<Task> tasks = new ArrayList<>(queue);
+            queue.clear();
+            for (Task task : tasks) {
+                if (!task.cancelled) {
+                    task.action.accept(task.handle);
+                }
+            }
+        }
+    }
+
+    static MenuDefinition definition() throws Exception {
+        // Inspect record constructors rather than depending on unrelated MyPet configuration fields.
+        Object section = record(SlotSection.class, Map.of(
+            "row", 0, "col", 0,
+            "item", allocate(de.Keyle.MyPet.api.gui.ItemAppearance.class)));
+        return (MenuDefinition) record(MenuDefinition.class, Map.of(
+            "menuId", "test", "titleMiniMessage", "test", "rows", 6,
+            "sections", Map.of("nuomi-return", section)));
+    }
+
+    static Object record(Class<?> type, Map<String, Object> values) throws Exception {
+        var components = type.getRecordComponents();
+        Class<?>[] types = Arrays.stream(components).map(RecordComponent::getType).toArray(Class<?>[]::new);
+        Object[] args = Arrays.stream(components).map(c -> values.getOrDefault(c.getName(),
+            c.getType() == int.class ? 0 : c.getType() == boolean.class ? false : null)).toArray();
+        return type.getDeclaredConstructor(types).newInstance(args);
+    }
+
+    public static void main(String[] args) throws Exception {
+        List<String> failures = new ArrayList<>();
+        for (boolean pet : new boolean[]{false, true}) {
+            for (String event : List.of("close", "supported", "unsupported", "quit", "disable")) {
+                for (boolean afterFirst : new boolean[]{false, true}) {
+                    TrMenuGateway.opens = 0;
+                    Fixture f = new Fixture(pet);
+                    f.click(pet);
+                    if (afterFirst) {
+                        f.tick();
+                    }
+                    // After the first tick an open may already have completed; count only later opens.
+                    int before = TrMenuGateway.opens;
+                    f.change(event);
+                    f.tick();
+                    f.tick();
+                    if (TrMenuGateway.opens != before) {
+                        failures.add("pet=" + pet + " " + event + " afterFirst=" + afterFirst);
+                    }
+                }
+            }
+            TrMenuGateway.opens = 0;
+            Fixture f = new Fixture(pet);
+            f.click(pet);
+            f.click(pet);
+            f.tick();
+            f.tick();
+            if (TrMenuGateway.opens != 1) {
+                failures.add("consecutive return pet=" + pet);
+            }
+            // A completed controlled return must leave no unconditional second-stage open queued.
+            if (!f.queue.isEmpty()) {
+                failures.add("tail queue pet=" + pet);
+            }
+        }
+        TrMenuGateway.opens = 0;
+        Fixture direct = new Fixture(false);
+        direct.commands.onCommand(direct.player, null, "nuomimenu", new String[0]);
+        if (TrMenuGateway.opens != 0) {
+            failures.add("public command lost next-tick semantics");
+        }
+        // Public commands keep their independent next-tick semantics across inventory close.
+        direct.close();
+        direct.tick();
+        if (TrMenuGateway.opens != 1) {
+            failures.add("public command incorrectly cancelled by close");
+        }
+        if (!failures.isEmpty()) {
+            throw new AssertionError(String.join("\n", failures));
+        }
+        System.out.println("Lifecycle assertions passed: inventory/MyPet, before/after first tick, close, both window types, quit, disable, consecutive returns, public command semantics");
+    }
+}

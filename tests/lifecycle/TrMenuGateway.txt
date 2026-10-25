@@ -1,0 +1,19 @@
+package team.nomi.bridge;
+
+import org.bukkit.entity.Player;
+import org.bukkit.plugin.java.JavaPlugin;
+
+/** Counts fixed Menu API requests without opening a real TrMenu window. */
+final class TrMenuGateway {
+    static int opens;
+
+    TrMenuGateway(JavaPlugin plugin) {
+    }
+
+    void open(Player player, String id) {
+        if (!id.equals("Menu")) {
+            throw new AssertionError(id);
+        }
+        opens++;
+    }
+}

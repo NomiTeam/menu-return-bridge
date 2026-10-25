@@ -1,0 +1,37 @@
+package de.Keyle.MyPet.gui;
+
+import de.Keyle.MyPet.api.gui.MenuDefinition;
+import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.InventoryHolder;
+
+/** Close dispatches bridge events only; dispatcher state and native parent stacks are not simulated. */
+public final class MenuInstanceImpl implements InventoryHolder {
+
+    public MenuDefinition definition;
+
+    public Object context;
+
+    public Runnable closing = () -> {
+    };
+
+    public MenuDefinition definition() {
+        return definition;
+    }
+
+    public Object context() {
+        return context;
+    }
+
+    public Inventory getInventory() {
+        return null;
+    }
+
+    public void close() {
+        closing.run();
+    }
+    // The root-menu fixture has no parent; native child-menu behavior is outside this harness.
+
+    public boolean popBack() {
+        return false;
+    }
+}
