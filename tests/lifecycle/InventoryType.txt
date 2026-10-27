@@ -1,0 +1,8 @@
+package org.bukkit.event.inventory;
+/** Avoids server-only MenuType registry initialization in the headless harness. */
+public enum InventoryType {
+    CHEST, HOPPER, DISPENSER, FURNACE;
+    public enum SlotType {
+        CONTAINER, OUTSIDE, QUICKBAR, ARMOR, RESULT, CRAFTING, FUEL
+    }
+}

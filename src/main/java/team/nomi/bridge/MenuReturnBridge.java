@@ -1,96 +1,188 @@
 package team.nomi.bridge;
 
-import java.util.*;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import org.bukkit.*;
-import org.bukkit.command.*;
-import org.bukkit.entity.Player;
-import org.bukkit.event.*;
-import org.bukkit.event.inventory.*;
-import org.bukkit.event.player.PlayerQuitEvent;
-import org.bukkit.inventory.*;
-import org.bukkit.persistence.PersistentDataType;
-import org.bukkit.plugin.java.JavaPlugin;
-import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
-import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.format.*;
+import java.util.logging.Level;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
+import org.bukkit.NamespacedKey;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandSender;
+import org.bukkit.entity.Player;
+import org.bukkit.event.Event;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
+import org.bukkit.event.Listener;
+import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryCloseEvent;
+import org.bukkit.event.inventory.InventoryOpenEvent;
+import org.bukkit.event.inventory.InventoryType;
+import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.inventory.Inventory;
+import org.bukkit.plugin.java.JavaPlugin;
 
-/** Inventory access and deferred navigation stay on the viewing player's entity scheduler. */
+/** 装配可选导航集成，管理受支持库存的会话与管理员审计入口。 */
 public final class MenuReturnBridge extends JavaPlugin implements Listener {
- private final Map<UUID,Session> sessions=new ConcurrentHashMap<>();
- private final Map<ClassLoader,String> owners=new HashMap<>();
- private NamespacedKey key;
- private PetNavigation petNavigation;
- private static final StackWalker WALKER=StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
- private static final class Session {
-  final Inventory inventory; final String owner,title,holder;
-  ScheduledTask refresh,route;
-  Session(Inventory i,String o,String t,String h){inventory=i;owner=o;title=t;holder=h;}
-  void stop(){if(refresh!=null)refresh.cancel();if(route!=null)route.cancel();}
-  boolean slot(int s){return Navigation.menu(owner,title,holder,inventory.getSize(),s);}
- }
- @Override public void onEnable(){
-  key=new NamespacedKey(this,"return_to_menu");
-  for(var p:getServer().getPluginManager().getPlugins())
-   if(Set.of("FarmersDelight","PlayerInv").contains(p.getName()))owners.put(p.getClass().getClassLoader(),p.getName());
-  getCommand("nuomimenu").setExecutor(new PublicMenus(this));
-  getServer().getPluginManager().registerEvents(this,this);
-  var pet=getServer().getPluginManager().getPlugin("MyPet");
-  if(pet!=null && pet.isEnabled())try{petNavigation=new PetNavigation(this);getServer().getPluginManager().registerEvents(petNavigation,this);}
-  catch(LinkageError ex){getLogger().log(java.util.logging.Level.WARNING,"MyPet navigation unavailable: requires MyPet 4.0.4 GUI API",ex);}
- }
- @Override public void onDisable(){if(petNavigation!=null)petNavigation.shutdown();sessions.values().forEach(Session::stop);sessions.clear();}
- private void stop(UUID id){var old=sessions.remove(id);if(old!=null)old.stop();}
- private String owner(Inventory i){
-  var h=i.getHolder(false);String o=h==null?null:owners.get(h.getClass().getClassLoader());
-  return o!=null?o:WALKER.walk(s->s.map(f->owners.get(f.getDeclaringClass().getClassLoader())).filter(Objects::nonNull).findFirst().orElse(""));
- }
- @EventHandler(priority=EventPriority.MONITOR,ignoreCancelled=true) public void open(InventoryOpenEvent e){
-  if(!(e.getPlayer() instanceof Player p))return;
-  stop(p.getUniqueId());
-  Inventory i=e.getInventory();if(!Set.of(InventoryType.CHEST,InventoryType.HOPPER,InventoryType.DISPENSER).contains(i.getType()))return;
-  var h=i.getHolder(false);
-  Session s=new Session(i,owner(i),PlainTextComponentSerializer.plainText().serialize(e.getView().title()),h==null?"":h.getClass().getName());
-  boolean supported=false;for(int n=0;n<i.getSize();n++)supported|=s.slot(n);if(!supported)return;
-  sessions.put(p.getUniqueId(),s);
-  s.refresh=p.getScheduler().runAtFixedRate(this,t->{
-   if(p.getOpenInventory().getTopInventory()!=i){t.cancel();sessions.remove(p.getUniqueId(),s);s.stop();return;}scan(s);
-  },()->sessions.remove(p.getUniqueId(),s),1,5);
- }
- private boolean marked(ItemStack i){return i!=null && i.hasItemMeta() && i.getItemMeta().getPersistentDataContainer().has(key,PersistentDataType.BYTE);}
- private boolean navigation(ItemStack i){
-  if(marked(i))return true;if(i==null || !i.hasItemMeta())return false;
-  Component c=i.getItemMeta().displayName();return c!=null && Navigation.name(PlainTextComponentSerializer.plainText().serialize(c));
- }
- private ItemStack button(){
-  ItemStack i=new ItemStack(Material.FLOW_BANNER_PATTERN);var m=i.getItemMeta();
-  m.displayName(Component.text("↩ 返回上层",TextColor.color(0xFFBBD0)).decoration(TextDecoration.BOLD,true).decoration(TextDecoration.ITALIC,false));
-  m.lore(List.of(Component.text("退出当前菜单。",TextColor.color(0xFFF4B4)).decoration(TextDecoration.ITALIC,false)));
-  m.getPersistentDataContainer().set(key,PersistentDataType.BYTE,(byte)1);i.setItemMeta(m);return i;
- }
- private void scan(Session s){for(int n=0;n<s.inventory.getSize();n++)if(s.slot(n)&&navigation(s.inventory.getItem(n))&&!marked(s.inventory.getItem(n)))s.inventory.setItem(n,button());}
- @EventHandler(priority=EventPriority.LOWEST) public void click(InventoryClickEvent e){
-  if(!(e.getWhoClicked() instanceof Player p))return;var s=sessions.get(p.getUniqueId());
-  if(s==null || e.getView().getTopInventory()!=s.inventory || !s.slot(e.getRawSlot()) || !navigation(e.getCurrentItem()))return;
-  e.setCancelled(true);e.setResult(Event.Result.DENY);
-  if(s.route!=null)s.route.cancel();
-  s.route=p.getScheduler().runDelayed(this,t->{
-   if(sessions.get(p.getUniqueId())!=s || p.getOpenInventory().getTopInventory()!=s.inventory)return;
-   stop(p.getUniqueId());p.performCommand("nuomimenu");
-  },null,1);
- }
- @EventHandler public void close(InventoryCloseEvent e){var s=sessions.get(e.getPlayer().getUniqueId());if(s!=null && s.inventory==e.getInventory())stop(e.getPlayer().getUniqueId());}
- @EventHandler public void quit(PlayerQuitEvent e){stop(e.getPlayer().getUniqueId());}
- @Override public boolean onCommand(CommandSender sender,Command c,String label,String[] a){
-  if(!sender.hasPermission("menureturn.audit"))return true;
-  try{Navigation.verify();sender.sendMessage("Navigation boundary assertions passed; active sessions="+sessions.size());}
-  catch(AssertionError ex){getLogger().log(java.util.logging.Level.SEVERE,"Navigation assertions failed",ex);sender.sendMessage("Navigation assertions FAILED");return true;}
-  if(a.length==0 || a[0].equalsIgnoreCase("audit"))for(Player p:getServer().getOnlinePlayers())p.getScheduler().run(this,t->{
-   var s=sessions.get(p.getUniqueId());if(s==null || p.getOpenInventory().getTopInventory()!=s.inventory)return;
-   int count=0;for(int n=0;n<s.inventory.getSize();n++)if(marked(s.inventory.getItem(n))){if(!s.slot(n))throw new IllegalStateException("Marker outside navigation boundary");count++;}
-   getLogger().info("AUDIT player="+p.getUniqueId()+" owner="+s.owner+" marked="+count);
-  },null);
-  return true;
- }
+    private static final StackWalker WALKER = StackWalker.getInstance(StackWalker.Option.RETAIN_CLASS_REFERENCE);
+    private final Map<UUID, InventorySession> sessions = new ConcurrentHashMap<>();
+    private final Map<ClassLoader, String> owners = new HashMap<>();
+    private ReturnButton button;
+    private PetNavigation petNavigation;
+
+    /** 注册自身命令和已安装的可选集成，保留既有 PDC 命名空间。 */
+    @Override
+    public void onEnable() {
+        button = new ReturnButton(new NamespacedKey(this, "return_to_menu"));
+        for (var plugin : getServer().getPluginManager().getPlugins()) {
+            if (Set.of("FarmersDelight", "PlayerInv").contains(plugin.getName())) {
+                owners.put(plugin.getClass().getClassLoader(), plugin.getName());
+            }
+        }
+        getCommand("nuomimenu").setExecutor(new PublicMenus(this));
+        getServer().getPluginManager().registerEvents(this, this);
+        var pet = getServer().getPluginManager().getPlugin("MyPet");
+        if (pet != null && pet.isEnabled()) {
+            try {
+                petNavigation = new PetNavigation(this);
+                getServer().getPluginManager().registerEvents(petNavigation, this);
+            } catch (LinkageError exception) {
+                getLogger().log(Level.WARNING, "MyPet navigation unavailable: requires MyPet 4.0.4 GUI API", exception);
+            }
+        }
+    }
+
+    /** 停止所有会话任务，不在插件禁用阶段访问玩家库存。 */
+    @Override
+    public void onDisable() {
+        if (petNavigation != null) {
+            petNavigation.shutdown();
+        }
+        sessions.values().forEach(InventorySession::stop);
+        sessions.clear();
+    }
+
+    private void stop(UUID playerId) {
+        var previous = sessions.remove(playerId);
+        if (previous != null) {
+            previous.stop();
+        }
+    }
+
+    private String owner(Inventory inventory) {
+        var holder = inventory.getHolder(false);
+        String owner = holder == null ? null : owners.get(holder.getClass().getClassLoader());
+        if (owner != null) {
+            return owner;
+        }
+        // 原生菜单可能没有 holder；只从已登记插件的调用栈识别，不凭标题认领其他插件。
+        return WALKER.walk(frames -> frames
+            .map(frame -> owners.get(frame.getDeclaringClass().getClassLoader()))
+            .filter(Objects::nonNull)
+            .findFirst().orElse(""));
+    }
+
+    /** 在成功打开受支持窗口时建立会话；新窗口始终使旧路由失效。 */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void open(InventoryOpenEvent event) {
+        if (!(event.getPlayer() instanceof Player player)) {
+            return;
+        }
+        stop(player.getUniqueId());
+        Inventory inventory = event.getInventory();
+        if (!Set.of(InventoryType.CHEST, InventoryType.HOPPER, InventoryType.DISPENSER).contains(inventory.getType())) {
+            return;
+        }
+        var holder = inventory.getHolder(false);
+        var session = new InventorySession(inventory, owner(inventory),
+            PlainTextComponentSerializer.plainText().serialize(event.getView().title()),
+            holder == null ? "" : holder.getClass().getName());
+        if (!session.isSupported()) {
+            return;
+        }
+        sessions.put(player.getUniqueId(), session);
+        // Paper/Folia 库存读写随玩家实体调度；定时刷新兼容原插件异步于打开事件的填充。
+        session.refresh = player.getScheduler().runAtFixedRate(this, task -> {
+            if (player.getOpenInventory().getTopInventory() != inventory) {
+                task.cancel();
+                sessions.remove(player.getUniqueId(), session);
+                session.stop();
+                return;
+            }
+            session.refreshButtons(button);
+        }, () -> sessions.remove(player.getUniqueId(), session), 1, 5);
+    }
+
+    /** 只拦截当前会话上层库存内的返回项，下一 tick 再打开公共菜单。 */
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void click(InventoryClickEvent event) {
+        if (!(event.getWhoClicked() instanceof Player player)) {
+            return;
+        }
+        var session = sessions.get(player.getUniqueId());
+        if (session == null || event.getView().getTopInventory() != session.inventory
+            || !session.allowsSlot(event.getRawSlot()) || !button.isNavigation(event.getCurrentItem())) {
+            return;
+        }
+        event.setCancelled(true);
+        event.setResult(Event.Result.DENY);
+        session.cancelRoute();
+        session.route = player.getScheduler().runDelayed(this, task -> {
+            if (sessions.get(player.getUniqueId()) != session
+                || player.getOpenInventory().getTopInventory() != session.inventory) {
+                return;
+            }
+            stop(player.getUniqueId());
+            // 已在玩家实体线程且刚核验源窗口；直接完成返回，避免公共命令再排一 tick 后失去生命周期约束。
+            new TrMenuGateway(this).open(player, "Menu");
+        }, null, 1);
+    }
+
+    /** 仅关闭匹配的旧库存，避免迟到的关闭事件删除新会话。 */
+    @EventHandler
+    public void close(InventoryCloseEvent event) {
+        var session = sessions.get(event.getPlayer().getUniqueId());
+        if (session != null && session.inventory == event.getInventory()) {
+            stop(event.getPlayer().getUniqueId());
+        }
+    }
+
+    /** 退出时取消该玩家的刷新和待执行返回。 */
+    @EventHandler
+    public void quit(PlayerQuitEvent event) {
+        stop(event.getPlayer().getUniqueId());
+    }
+
+    /** 管理员边界断言；audit 在每位玩家实体线程检查当前库存标记。 */
+    @Override
+    public boolean onCommand(CommandSender sender, Command command, String label, String[] arguments) {
+        if (!sender.hasPermission("menureturn.audit")) {
+            return true;
+        }
+        try {
+            Navigation.verify();
+            sender.sendMessage("Navigation boundary assertions passed; active sessions=" + sessions.size());
+        } catch (AssertionError exception) {
+            getLogger().log(Level.SEVERE, "Navigation assertions failed", exception);
+            sender.sendMessage("Navigation assertions FAILED");
+            return true;
+        }
+        if (arguments.length == 0 || arguments[0].equalsIgnoreCase("audit")) {
+            for (Player player : getServer().getOnlinePlayers()) {
+                player.getScheduler().run(this, task -> audit(player), null);
+            }
+        }
+        return true;
+    }
+
+    private void audit(Player player) {
+        var session = sessions.get(player.getUniqueId());
+        if (session == null || player.getOpenInventory().getTopInventory() != session.inventory) {
+            return;
+        }
+        int marked = session.audit(button);
+        getLogger().info("AUDIT player=" + player.getUniqueId() + " owner=" + session.owner + " marked=" + marked);
+    }
 }

@@ -1,0 +1,23 @@
+package team.nomi.bridge;
+
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.NamespacedKey;
+
+/** Recognition always succeeds; real item appearance and PDC validation are outside this harness. */
+final class ReturnButton {
+
+    ReturnButton(NamespacedKey key) {
+    }
+
+    boolean isNavigation(ItemStack item) {
+        return true;
+    }
+
+    boolean isMarked(ItemStack item) {
+        return true;
+    }
+
+    ItemStack create() {
+        return null;
+    }
+}
